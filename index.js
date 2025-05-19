@@ -19,6 +19,15 @@ app.post("/slack/webhook", (req, res) => {
   // 3) Anything else → still 200 (or 204) so Slack stays happy
   return res.sendStatus(200);
 });
+import { WebClient } from "@slack/web-api";
+const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
+
+// inside the POST handler, after you detect an app_mention event
+await slack.chat.postMessage({
+  channel: event.channel,
+  thread_ts: event.ts,
+  text: "👋 Hello, world! I received your mention.",
+});
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Listening on ${PORT}`));
