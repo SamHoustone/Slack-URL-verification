@@ -1,33 +1,47 @@
 import express from "express";
+import { WebClient } from "@slack/web-api";
+import morgan from "morgan";          // optional pretty logs
+
+// --- config -------------------------------------------------
+const PORT = process.env.PORT || 10000;
+const slack = new WebClient(process.env.SLACK_BOT_TOKEN); // must be set in Render → Env
+// -----------------------------------------------------------
+
 const app = express();
 app.use(express.json());
+app.use(morgan("tiny"));              // logs each request line
 
-app.post("/slack/webhook", (req, res) => {
+// health-check for browsers
+app.get("/slack/webhook", (_, res) =>
+  res.send("Slack webhook up — POST only.")
+);
+
+app.post("/slack/webhook", async (req, res) => {
   const { type, challenge, event } = req.body;
 
-  // 1) URL-verification handshake
+  // 1) Slack URL-verification handshake
   if (type === "url_verification") {
-    return res.json({ challenge });      // 200 OK
+    return res.json({ challenge });          // 200 OK
   }
 
-  // 2) Every real Slack event lands here
+  // 2) Normal events arrive here
   if (type === "event_callback") {
-    console.log("⚡️  event:", event);    // <- shows in Render logs
-    return res.sendStatus(200);          // MUST be 2xx or Slack will retry/disable
+    console.log("⚡️  event:", event);        // view in Render logs
+
+    // sample echo: reply only to app_mentions
+    if (event.type === "app_mention") {
+      await slack.chat.postMessage({
+        channel: event.channel,
+        thread_ts: event.ts,                 // reply in thread
+        text: "👋 Hello, world! I received your mention.",
+      });
+    }
+    return res.sendStatus(200);              // ALWAYS 2xx
   }
 
-  // 3) Anything else → still 200 (or 204) so Slack stays happy
-  return res.sendStatus(200);
-});
-import { WebClient } from "@slack/web-api";
-const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
-
-// inside the POST handler, after you detect an app_mention event
-await slack.chat.postMessage({
-  channel: event.channel,
-  thread_ts: event.ts,
-  text: "👋 Hello, world! I received your mention.",
+  // 3) Fallback
+  res.sendStatus(200);
 });
 
-const PORT = process.env.PORT || 10000;
+// start server
 app.listen(PORT, () => console.log(`Listening on ${PORT}`));
