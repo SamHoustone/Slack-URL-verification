@@ -10,5 +10,5 @@ app.post("/slack/webhook", (req, res) => {
   return res.sendStatus(400);         // anything else = bad request
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Listening on ${PORT}`));
