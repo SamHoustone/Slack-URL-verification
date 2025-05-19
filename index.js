@@ -1,13 +1,23 @@
 import express from "express";
 const app = express();
-app.use(express.json());          // Parse JSON bodies
+app.use(express.json());
 
 app.post("/slack/webhook", (req, res) => {
-  const { type, challenge } = req.body;
-  if (type === "url_verification" && challenge) {
-    return res.json({ challenge });   // <-- the magic 1-liner
+  const { type, challenge, event } = req.body;
+
+  // 1) URL-verification handshake
+  if (type === "url_verification") {
+    return res.json({ challenge });      // 200 OK
   }
-  return res.sendStatus(400);         // anything else = bad request
+
+  // 2) Every real Slack event lands here
+  if (type === "event_callback") {
+    console.log("⚡️  event:", event);    // <- shows in Render logs
+    return res.sendStatus(200);          // MUST be 2xx or Slack will retry/disable
+  }
+
+  // 3) Anything else → still 200 (or 204) so Slack stays happy
+  return res.sendStatus(200);
 });
 
 const PORT = process.env.PORT || 10000;
