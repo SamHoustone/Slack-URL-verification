@@ -1,47 +1,59 @@
 import express from "express";
 import { WebClient } from "@slack/web-api";
-import morgan from "morgan";          // optional pretty logs
+import chrono from "chrono-node";
 
-// --- config -------------------------------------------------
-const PORT = process.env.PORT || 10000;
-const slack = new WebClient(process.env.SLACK_BOT_TOKEN); // must be set in Render → Env
-// -----------------------------------------------------------
-
-const app = express();
+const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
+const app   = express();
 app.use(express.json());
-app.use(morgan("tiny"));              // logs each request line
-
-// health-check for browsers
-app.get("/slack/webhook", (_, res) =>
-  res.send("Slack webhook up — POST only.")
-);
 
 app.post("/slack/webhook", async (req, res) => {
   const { type, challenge, event } = req.body;
+  if (type === "url_verification") return res.json({ challenge });
 
-  // 1) Slack URL-verification handshake
-  if (type === "url_verification") {
-    return res.json({ challenge });          // 200 OK
-  }
-
-  // 2) Normal events arrive here
-  if (type === "event_callback") {
-    console.log("⚡️  event:", event);        // view in Render logs
-
-    // sample echo: reply only to app_mentions
-    if (event.type === "app_mention") {
-      await slack.chat.postMessage({
-        channel: event.channel,
-        thread_ts: event.ts,                 // reply in thread
-        text: "👋 Hello, world! I received your mention.",
-      });
+  if (type === "event_callback" && event.type === "app_mention") {
+    try {
+      await handleMention(event);
+    } catch (err) {
+      console.error(err);
     }
-    return res.sendStatus(200);              // ALWAYS 2xx
   }
-
-  // 3) Fallback
-  res.sendStatus(200);
+  res.sendStatus(200);   // always acknowledge
 });
 
-// start server
-app.listen(PORT, () => console.log(`Listening on ${PORT}`));
+async function handleMention(event) {
+  const text = event.text;                             // full message body
+  const mentionMatch = text.match(/<@([A-Z0-9]+)>/g);  // all user mentions
+  if (!mentionMatch || mentionMatch.length < 2) return; // need bot + someone else
+  const userId = mentionMatch[1].replace(/[<>@]/g, ""); // second mention = target
+
+  // strip the two mentions → leave the sentence
+  const core = text.replace(/<@([A-Z0-9]+)>/g, "").trim();
+
+  // very naive split: “… remind … at TIME”
+  const [, message, timePart] = core.match(/remind\s+(.*)\s+at\s+(.*)/i) || [];
+  if (!message || !timePart) return;
+
+  // convert "3 pm", "tomorrow 9", "17:30" → Unix epoch (sec)
+  const date = chrono.parseDate(timePart, new Date(), { forwardDate: true });
+  if (!date) return;
+
+  const result = await slack.conversations.open({ users: userId });
+  const dmChannel = result.channel.id;
+
+  await slack.chat.scheduleMessage({
+    channel: dmChannel,
+    text: `⏰ Reminder: ${message}`,
+    post_at: Math.floor(date.getTime() / 1000), // epoch seconds
+  });
+
+  // Optional confirmation back in original thread
+  await slack.chat.postMessage({
+    channel: event.channel,
+    thread_ts: event.ts,
+    text: `👍 Got it! I’ll remind <@${userId}> at ${date.toLocaleTimeString()}.`,
+  });
+}
+
+app.listen(process.env.PORT || 10000, () =>
+  console.log("Listening…"),
+);
