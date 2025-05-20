@@ -1,4 +1,4 @@
-// index.js  —  Slack DM Reminder Bot
+// index.js — Slack DM Reminder Bot (self-reminders always allowed)
 import express from "express";
 import { WebClient } from "@slack/web-api";
 import * as chrono from "chrono-node";
@@ -8,82 +8,82 @@ const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 const app   = express();
 
 app.use(express.json());
-app.use(morgan("tiny"));                           // logs each request line
+app.use(morgan("tiny"));
 
-/* health-check for browser GET */
+// Health-check
 app.get("/slack/webhook", (_, res) =>
   res.send("Slack Reminder Bot up — POST only.")
 );
 
-/* Slack sends all events here */
 app.post("/slack/webhook", async (req, res) => {
   const { type, challenge, event } = req.body;
 
-  if (type === "url_verification") return res.json({ challenge });
+  if (type === "url_verification") {
+    return res.json({ challenge });
+  }
 
   if (type === "event_callback" && event?.type === "app_mention") {
     handleMention(event).catch(err =>
       console.error("handleMention error:", err)
     );
   }
-  res.sendStatus(200);                             // ALWAYS 200
+
+  // Always 200 so Slack keeps sending events
+  res.sendStatus(200);
 });
 
-/* ---------- helper utils ---------- */
 const bail = reason => console.log("⛔ bail:", reason);
-
 function parseNatural(str) {
-  // help chrono parse bare "2 minutes", "3 hours"
   if (/^\d+\s*(minutes?|hours?)$/i.test(str)) str = "in " + str;
   return chrono.parseDate(str, new Date(), { forwardDate: true });
 }
-/* ----------------------------------- */
 
-/* -------- core logic --------------- */
 async function handleMention(event) {
   console.log("🔔 handleMention called");
   console.log("full event text →", event.text);
   console.log("author →", event.user);
 
-  const botId = event.authorizations?.[0]?.user_id;
-
-  // strip only the bot's own mention
+  // 1) Strip only the bot’s own mention
+  const botId     = event.authorizations?.[0]?.user_id;
   const mentionRE = /<@([A-Z0-9]+)>/g;
-  const stripped  = event.text.replace(mentionRE, (m, id) => (id === botId ? "" : m)).trim();
+  const stripped  = event.text.replace(mentionRE, (m, id) =>
+    id === botId ? "" : m
+  ).trim();
 
-  // target user: default to sender, override if another @user present
-  let targetUser = event.user;
-  const extraMention = stripped.match(mentionRE);
-  if (extraMention) targetUser = extraMention[0].replace(/[<@>]/g, "");
+  // 2) Determine target user
+  let targetUser = event.user;                   // “me” case
+  const extra    = stripped.match(mentionRE);    // explicit mention?
+  if (extra) {
+    targetUser = extra[0].replace(/[<@>]/g, "");
+    // only now check if that explicit mention is a bot
+    const { user } = await slack.users.info({ user: targetUser });
+    if (user.is_bot) return bail("explicit target-is-bot");
+  }
 
-  // fetch profile to see if Slack thinks target is a bot
-  const { user } = await slack.users.info({ user: targetUser });
-
-  // ⬇️ NEW — allow "me" even if Slack says is_bot
-  if (user.is_bot && targetUser !== event.user) return bail("target-is-bot");
-
-  /* ---------- split “message … at …” ---------- */
+  // 3) Parse out “message … at time”
   const idx = stripped.toLowerCase().lastIndexOf(" at ");
   if (idx === -1)       return bail("no-at-keyword");
-
   const msg  = stripped.slice(0, idx).replace(/^remind\s+/i, "").trim();
   const when = stripped.slice(idx + 4).trim();
   if (!msg)  return bail("empty-msg");
   if (!when) return bail("empty-time");
 
+  // 4) Convert to future date & ensure ≥60s ahead
   const date  = parseNatural(when);
   if (!date)  return bail("chrono-fail");
   const epoch = Math.floor(date.getTime() / 1000);
-  if (epoch - Date.now() / 1000 < 60) return bail("time-too-soon");
+  if (epoch - Date.now()/1000 < 60) return bail("time-too-soon");
 
-  /* ---------- DM & scheduling ---------- */
+  // 5) Open (or fetch) the DM channel
   const { channel: dm } = await slack.conversations.open({ users: targetUser });
 
+  // 6) Immediate confirmation in the DM
   await slack.chat.postMessage({
     channel: dm.id,
     text: `👍 Got it! I’ll remind you at ${date.toLocaleTimeString()}.`,
   });
 
+  // 7) Schedule the actual reminder
   const resp = await slack.chat.scheduleMessage({
     channel: dm.id,
     text: `⏰ Reminder: ${msg}`,
@@ -91,7 +91,6 @@ async function handleMention(event) {
   });
   console.log("scheduled:", resp.scheduled_message_id);
 }
-/* ----------------------------------- */
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log("Listening on", PORT));
