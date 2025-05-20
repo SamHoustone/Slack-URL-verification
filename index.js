@@ -1,6 +1,7 @@
 import express from "express";
 import { WebClient } from "@slack/web-api";
-import chrono from "chrono-node";
+import * as chrono from "chrono-node";      // ← fixed
+import morgan from "morgan";
 
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 const app   = express();
