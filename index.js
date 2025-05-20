@@ -45,23 +45,24 @@ async function handleMention(event) {
   console.log("full event text →", event.text);
   console.log("author →", event.user);
 
-  /* identify bot’s own ID to strip its mention */
   const botId = event.authorizations?.[0]?.user_id;
 
-  /* remove only the bot mention */
+  // strip only the bot's own mention
   const mentionRE = /<@([A-Z0-9]+)>/g;
   const stripped  = event.text.replace(mentionRE, (m, id) => (id === botId ? "" : m)).trim();
 
-  /* target user: default to sender, override if another @user present */
+  // target user: default to sender, override if another @user present
   let targetUser = event.user;
   const extraMention = stripped.match(mentionRE);
   if (extraMention) targetUser = extraMention[0].replace(/[<@>]/g, "");
 
-  /* ignore if target is a bot */
+  // fetch profile to see if Slack thinks target is a bot
   const { user } = await slack.users.info({ user: targetUser });
-  if (user.is_bot) return bail("target-is-bot");
 
-  /* split on last " at " */
+  // ⬇️ NEW — allow "me" even if Slack says is_bot
+  if (user.is_bot && targetUser !== event.user) return bail("target-is-bot");
+
+  /* ---------- split “message … at …” ---------- */
   const idx = stripped.toLowerCase().lastIndexOf(" at ");
   if (idx === -1)       return bail("no-at-keyword");
 
@@ -75,16 +76,14 @@ async function handleMention(event) {
   const epoch = Math.floor(date.getTime() / 1000);
   if (epoch - Date.now() / 1000 < 60) return bail("time-too-soon");
 
-  /* open (or fetch) DM channel */
+  /* ---------- DM & scheduling ---------- */
   const { channel: dm } = await slack.conversations.open({ users: targetUser });
 
-  /* confirmation DM */
   await slack.chat.postMessage({
     channel: dm.id,
     text: `👍 Got it! I’ll remind you at ${date.toLocaleTimeString()}.`,
   });
 
-  /* schedule the reminder */
   const resp = await slack.chat.scheduleMessage({
     channel: dm.id,
     text: `⏰ Reminder: ${msg}`,
