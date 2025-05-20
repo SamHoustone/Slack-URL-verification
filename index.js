@@ -8,13 +8,14 @@ const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 const app   = express();
 
 app.use(express.json());
-app.use(morgan("tiny"));
+app.use(morgan("tiny"));                           // logs each request
 
-// Health-check
+// Health-check (GET)
 app.get("/slack/webhook", (_, res) =>
   res.send("Slack Reminder Bot up — POST only.")
 );
 
+// Main webhook endpoint (POST)
 app.post("/slack/webhook", async (req, res) => {
   const { type, challenge, event } = req.body;
 
@@ -43,41 +44,45 @@ async function handleMention(event) {
   console.log("full event text →", event.text);
   console.log("author →", event.user);
 
-  // 1) Strip only the bot’s own mention
+  // 1) Remove only the bot’s mention, leave any other <@U…> intact
   const botId     = event.authorizations?.[0]?.user_id;
   const mentionRE = /<@([A-Z0-9]+)>/g;
   const stripped  = event.text.replace(mentionRE, (m, id) =>
     id === botId ? "" : m
   ).trim();
 
-  // 2) Determine target user
-  let targetUser = event.user;                   // “me” case
-  const extra    = stripped.match(mentionRE);    // explicit mention?
+  // 2) Figure out who to remind
+  let targetUser = event.user;                // default = sender (“me”)
+  const extra    = stripped.match(mentionRE); // any other @mention?
   if (extra) {
     targetUser = extra[0].replace(/[<@>]/g, "");
-    // only now check if that explicit mention is a bot
-    const { user } = await slack.users.info({ user: targetUser });
-    if (user.is_bot) return bail("explicit target-is-bot");
+    // fetch that user's info
+    const info = await slack.users.info({ user: targetUser });
+    // only block if it's a bot *and* not the sender themselves
+    if (info.user?.is_bot && targetUser !== event.user) {
+      return bail("explicit target-is-bot");
+    }
   }
 
-  // 3) Parse out “message … at time”
+  // 3) Split on the last “ at ”
   const idx = stripped.toLowerCase().lastIndexOf(" at ");
   if (idx === -1)       return bail("no-at-keyword");
+
   const msg  = stripped.slice(0, idx).replace(/^remind\s+/i, "").trim();
   const when = stripped.slice(idx + 4).trim();
   if (!msg)  return bail("empty-msg");
   if (!when) return bail("empty-time");
 
-  // 4) Convert to future date & ensure ≥60s ahead
+  // 4) Parse time & ensure ≥ 60s in the future
   const date  = parseNatural(when);
   if (!date)  return bail("chrono-fail");
   const epoch = Math.floor(date.getTime() / 1000);
-  if (epoch - Date.now()/1000 < 60) return bail("time-too-soon");
+  if (epoch - Date.now() / 1000 < 60) return bail("time-too-soon");
 
-  // 5) Open (or fetch) the DM channel
+  // 5) Open (or fetch) the DM channel with that user
   const { channel: dm } = await slack.conversations.open({ users: targetUser });
 
-  // 6) Immediate confirmation in the DM
+  // 6) Send immediate confirmation in the DM
   await slack.chat.postMessage({
     channel: dm.id,
     text: `👍 Got it! I’ll remind you at ${date.toLocaleTimeString()}.`,
