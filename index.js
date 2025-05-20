@@ -1,23 +1,4 @@
-/**
- * Slack Reminder Bot — DM version
- * -------------------------------
- * ➊ package.json  must contain:
- *    {
- *      "type": "module",
- *      "dependencies": {
- *        "@slack/web-api": "^7.3.0",
- *        "chrono-node": "^2.7.8",
- *        "express": "^4.19.0",
- *        "morgan": "^1.10.0"
- *      }
- *    }
- * ➋ Environment variable (Render ▸ Environment ▸ Variables):
- *    SLACK_BOT_TOKEN = xoxb-…
- * ➌ Required bot-token scopes:
- *    chat:write, im:read, im:write, users:read,
- *    channels:read, channels:history
- */
-
+// index.js  —  Slack DM Reminder Bot
 import express from "express";
 import { WebClient } from "@slack/web-api";
 import * as chrono from "chrono-node";
@@ -27,71 +8,91 @@ const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 const app   = express();
 
 app.use(express.json());
-app.use(morgan("tiny"));               // request logging for Render
+app.use(morgan("tiny"));                           // logs each request line
 
-/* simple GET so you/Render can hit the endpoint */
+/* health-check for browser GET */
 app.get("/slack/webhook", (_, res) =>
-  res.send("Slack Reminder Bot up — send POSTs only.")
+  res.send("Slack Reminder Bot up — POST only.")
 );
 
+/* Slack sends all events here */
 app.post("/slack/webhook", async (req, res) => {
   const { type, challenge, event } = req.body;
 
   if (type === "url_verification") return res.json({ challenge });
 
   if (type === "event_callback" && event?.type === "app_mention") {
-    
-    console.log("🔔  handleMention called");
-    console.log("full event text →", event.text);
-    console.log("author →", event.user);
-
     handleMention(event).catch(err =>
       console.error("handleMention error:", err)
     );
   }
-  res.sendStatus(200);   // always acknowledge
+  res.sendStatus(200);                             // ALWAYS 200
 });
 
-/* -------- core logic ---------------------------------------------------- */
+/* ---------- helper utils ---------- */
+const bail = reason => console.log("⛔ bail:", reason);
+
+function parseNatural(str) {
+  // help chrono parse bare "2 minutes", "3 hours"
+  if (/^\d+\s*(minutes?|hours?)$/i.test(str)) str = "in " + str;
+  return chrono.parseDate(str, new Date(), { forwardDate: true });
+}
+/* ----------------------------------- */
+
+/* -------- core logic --------------- */
 async function handleMention(event) {
+  console.log("🔔 handleMention called");
+  console.log("full event text →", event.text);
+  console.log("author →", event.user);
+
+  /* identify bot’s own ID to strip its mention */
   const botId = event.authorizations?.[0]?.user_id;
+
+  /* remove only the bot mention */
   const mentionRE = /<@([A-Z0-9]+)>/g;
+  const stripped  = event.text.replace(mentionRE, (m, id) => (id === botId ? "" : m)).trim();
 
-  // strip out only the bot's own mention
-  const cleaned = event.text.replace(mentionRE, (m, id) => (id === botId ? "" : m)).trim();
-
-  // if "me" is present, target = sender
+  /* target user: default to sender, override if another @user present */
   let targetUser = event.user;
-  const explicit = cleaned.match(mentionRE);
-  if (explicit && explicit.length) {
-    targetUser = explicit[0].replace(/[<@>]/g, "");
-  }
+  const extraMention = stripped.match(mentionRE);
+  if (extraMention) targetUser = extraMention[0].replace(/[<@>]/g, "");
 
-  // bail if target is a bot
+  /* ignore if target is a bot */
   const { user } = await slack.users.info({ user: targetUser });
-  if (user.is_bot) return;
+  if (user.is_bot) return bail("target-is-bot");
 
-  // parse "remind ... at ..."
-  const [, msg, when] = cleaned.match(/remind\s+(.*)\s+at\s+(.*)/i) || [];
-  if (!msg || !when) return;
+  /* split on last " at " */
+  const idx = stripped.toLowerCase().lastIndexOf(" at ");
+  if (idx === -1)       return bail("no-at-keyword");
 
-  const date = chrono.parseDate(when, new Date(), { forwardDate: true });
-  if (!date) return;
+  const msg  = stripped.slice(0, idx).replace(/^remind\s+/i, "").trim();
+  const when = stripped.slice(idx + 4).trim();
+  if (!msg)  return bail("empty-msg");
+  if (!when) return bail("empty-time");
 
+  const date  = parseNatural(when);
+  if (!date)  return bail("chrono-fail");
+  const epoch = Math.floor(date.getTime() / 1000);
+  if (epoch - Date.now() / 1000 < 60) return bail("time-too-soon");
+
+  /* open (or fetch) DM channel */
   const { channel: dm } = await slack.conversations.open({ users: targetUser });
 
+  /* confirmation DM */
   await slack.chat.postMessage({
     channel: dm.id,
     text: `👍 Got it! I’ll remind you at ${date.toLocaleTimeString()}.`,
   });
 
-  await slack.chat.scheduleMessage({
+  /* schedule the reminder */
+  const resp = await slack.chat.scheduleMessage({
     channel: dm.id,
     text: `⏰ Reminder: ${msg}`,
-    post_at: Math.floor(date.getTime() / 1000),
+    post_at: epoch,
   });
+  console.log("scheduled:", resp.scheduled_message_id);
 }
-/* ----------------------------------------------------------------------- */
+/* ----------------------------------- */
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log("Listening on", PORT));
