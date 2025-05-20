@@ -41,11 +41,10 @@ async function handleMention(event) {
   const result = await slack.conversations.open({ users: userId });
   const dmChannel = result.channel.id;
 
-  await slack.chat.scheduleMessage({
-    channel: dmChannel,
-    text: `⏰ Reminder: ${message}`,
-    post_at: Math.floor(date.getTime() / 1000), // epoch seconds
-  });
+  await slack.chat.postMessage({
+  channel: channel.id,
+  text: "Immediate test DM from the bot",
+});
 
   // Optional confirmation back in original thread
   await slack.chat.postMessage({
