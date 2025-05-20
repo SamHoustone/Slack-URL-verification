@@ -1,4 +1,30 @@
-// index.js — Slack DM Reminder Bot (self-reminders always allowed)
+// index.js — Slack DM Reminder Bot
+// --------------------------------
+// 1) package.json (root) must have:
+// {
+//   "type": "module",
+//   "scripts": { "start": "node index.js" },
+//   "dependencies": {
+//     "@slack/web-api": "^7.3.0",
+//     "chrono-node":  "^2.7.8",
+//     "express":      "^4.19.0",
+//     "morgan":       "^1.10.0"
+//   }
+// }
+//
+// 2) In Render (or your env), set:
+//    SLACK_BOT_TOKEN = xoxb-…   (mark it Secret)
+//
+// 3) Slack App → OAuth & Permissions → Bot Token Scopes:
+//    chat:write, im:read, im:write, users:read,
+//    channels:read, channels:history
+//    → Reinstall to Workspace
+//
+// 4) Event Subscriptions → Subscribe to Bot Events:
+//    app_mention
+//
+// 5) Invite your bot to any channel you test in.
+
 import express from "express";
 import { WebClient } from "@slack/web-api";
 import * as chrono from "chrono-node";
@@ -8,99 +34,103 @@ const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 const app   = express();
 
 app.use(express.json());
-app.use(morgan("tiny"));                         // logs each request
+app.use(morgan("tiny"));
 
-// Health-check (optional)
+// Health-check endpoint
 app.get("/slack/webhook", (_, res) =>
-  res.send("Slack Reminder Bot up — send POSTs only.")
+  res.send("Reminder bot is running. Use POST to /slack/webhook.")
 );
 
+// Main webhook
 app.post("/slack/webhook", async (req, res) => {
   const { type, challenge, event } = req.body;
 
-  // URL-verification handshake
+  // 1) URL-verification handshake
   if (type === "url_verification") {
     return res.json({ challenge });
   }
 
-  // Only handle app_mention events
+  // 2) Only handle app_mention events
   if (type === "event_callback" && event?.type === "app_mention") {
-    handleMention(event).catch(err =>
-      console.error("handleMention error:", err)
-    );
+    handleMention(event).catch(console.error);
   }
 
-  // Always 200 so Slack keeps sending events
+  // 3) Always 200 OK
   res.sendStatus(200);
 });
 
-const bail = reason => console.log("⛔ bail:", reason);
-function parseNatural(str) {
-  // help chrono with bare "2 minutes", "3 hours"
-  if (/^\d+\s*(minutes?|hours?)$/i.test(str)) str = "in " + str;
-  return chrono.parseDate(str, new Date(), { forwardDate: true });
-}
-
 async function handleMention(event) {
-  console.log("🔔 handleMention called");
-  console.log("full event text →", event.text);
-  console.log("author →", event.user);
+  console.log("🔔 handleMention called", event.text);
 
-  // 1) Strip only the bot’s mention
-  const botId     = event.authorizations?.[0]?.user_id;
-  const botTagRE  = new RegExp(`<@${botId}>`, "g");
-  let text        = event.text.replace(botTagRE, "").trim();
+  // Remove only the bot’s own mention
+  const botId = event.authorizations?.[0]?.user_id;
+  const botTag = `<@${botId}>`;
+  let text = event.text.replace(botTag, "").trim();
 
-  // 2) Determine target user & message core
-  let targetUser, core;
-  const meRE = /^remind\s+me\s+/i;
-  if (meRE.test(text)) {
-    // "remind me ..." → DM the sender
+  // Determine target and core message
+  let targetUser, coreText;
+  if (/^remind\s+me\s+/i.test(text)) {
+    // "remind me ..."
     targetUser = event.user;
-    core       = text.replace(meRE, "").trim();
+    coreText   = text.replace(/^remind\s+me\s+/i, "").trim();
   } else {
-    // explicit "@user" case
-    const mentionMatch = text.match(/<@([A-Z0-9]+)>/);
-    if (!mentionMatch) return bail("no-target");
-    targetUser = mentionMatch[1];
-    core       = text.replace(mentionMatch[0], "").trim();
-
-    // block true bots (but not self-reminders)
-    const info = await slack.users.info({ user: targetUser });
-    if (info.user?.is_bot) return bail("explicit target-is-bot");
+    // "remind @someone ..."
+    const m = text.match(/<@([A-Z0-9]+)>/);
+    if (!m) {
+      console.log("⛔ no user mention");
+      return;
+    }
+    targetUser = m[1];
+    coreText   = text.replace(m[0], "").trim();
   }
 
-  // 3) Split on the last " at "
-  const idx = core.toLowerCase().lastIndexOf(" at ");
-  if (idx === -1)       return bail("no-at-keyword");
-  const msg  = core.slice(0, idx).trim();
-  const when = core.slice(idx + 4).trim();
-  if (!msg)  return bail("empty-msg");
-  if (!when) return bail("empty-time");
+  // Split off the time clause on the last " at "
+  const lower = coreText.toLowerCase();
+  const idx   = lower.lastIndexOf(" at ");
+  if (idx === -1) {
+    console.log("⛔ no 'at' keyword");
+    return;
+  }
+  const message = coreText.slice(0, idx).trim();
+  const whenRaw = coreText.slice(idx + 4).trim();
+  if (!message || !whenRaw) {
+    console.log("⛔ empty message or time");
+    return;
+  }
 
-  // 4) Parse date & ensure ≥60s ahead
-  const date  = parseNatural(when);
-  if (!date)  return bail("chrono-fail");
-  const epoch = Math.floor(date.getTime() / 1000);
-  if (epoch - Date.now()/1000 < 60) return bail("time-too-soon");
+  // Parse natural time (ensuring "in 2 minutes" style)
+  let whenText = whenRaw;
+  if (/^\d+\s*(minutes?|hours?)$/i.test(whenRaw)) {
+    whenText = "in " + whenRaw;
+  }
+  const date = chrono.parseDate(whenText, new Date(), { forwardDate: true });
+  if (!date) {
+    console.log("⛔ chrono failed to parse", whenRaw);
+    return;
+  }
+  const epoch = Math.floor(date.getTime()/1000);
+  if (epoch - Date.now()/1000 < 60) {
+    console.log("⛔ time must be at least 60s in the future");
+    return;
+  }
 
-  // 5) Open (or fetch) a DM channel
+  // Open (or fetch) a DM channel
   const { channel: dm } = await slack.conversations.open({ users: targetUser });
 
-  // 6) Immediate DM confirmation
+  // Immediate DM confirmation
   await slack.chat.postMessage({
     channel: dm.id,
-    text: `👍 Got it! I’ll remind you at ${date.toLocaleTimeString()}.`,
+    text: `👍 Got it! I’ll remind you at ${date.toLocaleTimeString()}.`
   });
 
-  // 7) Schedule the actual reminder
+  // Schedule the reminder
   const resp = await slack.chat.scheduleMessage({
     channel: dm.id,
-    text: `⏰ Reminder: ${msg}`,
-    post_at: epoch,
+    text: `⏰ Reminder: ${message}`,
+    post_at: epoch
   });
-  console.log("scheduled:", resp.scheduled_message_id);
+  console.log("scheduled message:", resp.scheduled_message_id);
 }
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log("Listening on", PORT));
+app.listen(PORT, () => console.log(`Listening on ${PORT}`));
