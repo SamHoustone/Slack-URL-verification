@@ -40,6 +40,11 @@ app.post("/slack/webhook", async (req, res) => {
   if (type === "url_verification") return res.json({ challenge });
 
   if (type === "event_callback" && event?.type === "app_mention") {
+    
+    console.log("🔔  handleMention called");
+    console.log("full event text →", event.text);
+    console.log("author →", event.user);
+
     handleMention(event).catch(err =>
       console.error("handleMention error:", err)
     );
