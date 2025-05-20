@@ -8,21 +8,22 @@ const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 const app   = express();
 
 app.use(express.json());
-app.use(morgan("tiny"));                           // logs each request
+app.use(morgan("tiny"));                         // logs each request
 
-// Health-check (GET)
+// Health-check (optional)
 app.get("/slack/webhook", (_, res) =>
-  res.send("Slack Reminder Bot up — POST only.")
+  res.send("Slack Reminder Bot up — send POSTs only.")
 );
 
-// Main webhook endpoint (POST)
 app.post("/slack/webhook", async (req, res) => {
   const { type, challenge, event } = req.body;
 
+  // URL-verification handshake
   if (type === "url_verification") {
     return res.json({ challenge });
   }
 
+  // Only handle app_mention events
   if (type === "event_callback" && event?.type === "app_mention") {
     handleMention(event).catch(err =>
       console.error("handleMention error:", err)
@@ -35,6 +36,7 @@ app.post("/slack/webhook", async (req, res) => {
 
 const bail = reason => console.log("⛔ bail:", reason);
 function parseNatural(str) {
+  // help chrono with bare "2 minutes", "3 hours"
   if (/^\d+\s*(minutes?|hours?)$/i.test(str)) str = "in " + str;
   return chrono.parseDate(str, new Date(), { forwardDate: true });
 }
@@ -44,45 +46,48 @@ async function handleMention(event) {
   console.log("full event text →", event.text);
   console.log("author →", event.user);
 
-  // 1) Remove only the bot’s mention, leave any other <@U…> intact
+  // 1) Strip only the bot’s mention
   const botId     = event.authorizations?.[0]?.user_id;
-  const mentionRE = /<@([A-Z0-9]+)>/g;
-  const stripped  = event.text.replace(mentionRE, (m, id) =>
-    id === botId ? "" : m
-  ).trim();
+  const botTagRE  = new RegExp(`<@${botId}>`, "g");
+  let text        = event.text.replace(botTagRE, "").trim();
 
-  // 2) Figure out who to remind
-  let targetUser = event.user;                // default = sender (“me”)
-  const extra    = stripped.match(mentionRE); // any other @mention?
-  if (extra) {
-    targetUser = extra[0].replace(/[<@>]/g, "");
-    // fetch that user's info
+  // 2) Determine target user & message core
+  let targetUser, core;
+  const meRE = /^remind\s+me\s+/i;
+  if (meRE.test(text)) {
+    // "remind me ..." → DM the sender
+    targetUser = event.user;
+    core       = text.replace(meRE, "").trim();
+  } else {
+    // explicit "@user" case
+    const mentionMatch = text.match(/<@([A-Z0-9]+)>/);
+    if (!mentionMatch) return bail("no-target");
+    targetUser = mentionMatch[1];
+    core       = text.replace(mentionMatch[0], "").trim();
+
+    // block true bots (but not self-reminders)
     const info = await slack.users.info({ user: targetUser });
-    // only block if it's a bot *and* not the sender themselves
-    if (info.user?.is_bot && targetUser !== event.user) {
-      return bail("explicit target-is-bot");
-    }
+    if (info.user?.is_bot) return bail("explicit target-is-bot");
   }
 
-  // 3) Split on the last “ at ”
-  const idx = stripped.toLowerCase().lastIndexOf(" at ");
+  // 3) Split on the last " at "
+  const idx = core.toLowerCase().lastIndexOf(" at ");
   if (idx === -1)       return bail("no-at-keyword");
-
-  const msg  = stripped.slice(0, idx).replace(/^remind\s+/i, "").trim();
-  const when = stripped.slice(idx + 4).trim();
+  const msg  = core.slice(0, idx).trim();
+  const when = core.slice(idx + 4).trim();
   if (!msg)  return bail("empty-msg");
   if (!when) return bail("empty-time");
 
-  // 4) Parse time & ensure ≥ 60s in the future
+  // 4) Parse date & ensure ≥60s ahead
   const date  = parseNatural(when);
   if (!date)  return bail("chrono-fail");
   const epoch = Math.floor(date.getTime() / 1000);
-  if (epoch - Date.now() / 1000 < 60) return bail("time-too-soon");
+  if (epoch - Date.now()/1000 < 60) return bail("time-too-soon");
 
-  // 5) Open (or fetch) the DM channel with that user
+  // 5) Open (or fetch) a DM channel
   const { channel: dm } = await slack.conversations.open({ users: targetUser });
 
-  // 6) Send immediate confirmation in the DM
+  // 6) Immediate DM confirmation
   await slack.chat.postMessage({
     channel: dm.id,
     text: `👍 Got it! I’ll remind you at ${date.toLocaleTimeString()}.`,
