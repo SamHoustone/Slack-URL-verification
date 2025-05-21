@@ -51,7 +51,7 @@ async function handleMention(event) {
       console.log("⛔ no user mention");
       return;
     }
-    targetUser = m[2];
+    targetUser = m[1];
     coreText   = text.replace(m[0], "").trim();
   }
 
