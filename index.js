@@ -1,100 +1,99 @@
-// index.js — Slack Reminder Bot (“I will do it” + DM at scheduled time)
+// index.js — “I will do it” Reminder Bot
 import express from "express";
 import { WebClient } from "@slack/web-api";
 import * as chrono from "chrono-node";
 import morgan from "morgan";
 
-const app   = express();
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
+const app   = express();
 
 app.use(express.json());
 app.use(morgan("tiny"));
 
-// Health-check for browser
+// Health-check (optional)
 app.get("/slack/webhook", (_, res) =>
-  res.send("Reminder bot alive. POST events to /slack/webhook.")
+  res.send("Reminder bot is running. POST events to /slack/webhook.")
 );
 
 // Main webhook endpoint
 app.post("/slack/webhook", async (req, res) => {
   const { type, challenge, event } = req.body;
-
-  // 1. URL verification
-  if (type === "url_verification") {
-    return res.json({ challenge });
-  }
-
-  // 2. Handle app_mention events only
+  if (type === "url_verification") return res.json({ challenge });
   if (type === "event_callback" && event?.type === "app_mention") {
-    handleMention(event).catch(err =>
-      console.error("handleMention error:", err)
-    );
+    handleMention(event).catch(console.error);
   }
-
-  // 3. Always respond 200 OK
   res.sendStatus(200);
 });
 
 async function handleMention(event) {
   console.log("🔔 handleMention called:", event.text);
 
-  // Strip only the bot mention
+  // 1) Strip only the bot’s mention
   const botId  = event.authorizations?.[0]?.user_id;
-  const botTag = new RegExp(`<@${botId}>`, "g");
-  let text     = event.text.replace(botTag, "").trim();
+  const botTag = `<@${botId}>`;
+  let text     = event.text;
+  const i      = text.indexOf(botTag);
+  if (i !== -1) text = text.slice(i + botTag.length).trim();
 
-  // Regex to capture: optional “please ”, then “remind @user”, optional “to ”,
-  // then the task, then “ at ”, then time expression
-  const remindRE = /^(?:please\s+)?remind\s+<@([A-Z0-9]+)>\s+(?:to\s+)?(.+?)\s+at\s+(.+)$/i;
-  const match    = text.match(remindRE);
-  if (!match) {
+  // 2) Match either “remind me … at …” or “remind @user … at …”
+  const remindMeRE   = /^(?:please\s+)?remind\s+me\s+(?:to\s+)?(.+?)\s+at\s+(.+)$/i;
+  const remindUserRE = /^(?:please\s+)?remind\s+<@([A-Z0-9]+)>\s+(?:to\s+)?(.+?)\s+at\s+(.+)$/i;
+  let targetUser, taskText, timeRaw, m;
+
+  if ((m = text.match(remindMeRE))) {
+    targetUser = event.user;
+    taskText   = m[1];
+    timeRaw    = m[2];
+  } else if ((m = text.match(remindUserRE))) {
+    targetUser = m[1];
+    taskText   = m[2];
+    timeRaw    = m[3];
+  } else {
     console.log("⛔ did not match remind pattern");
     return;
   }
-  const [, targetUser, taskText, timeRaw] = match;
 
-  // Parse natural-language time
+  // 3) Parse the time naturally
   let whenText = timeRaw.trim();
   if (/^\d+\s*(minutes?|hours?)$/i.test(whenText)) {
     whenText = "in " + whenText;
   }
   const date = chrono.parseDate(whenText, new Date(), { forwardDate: true });
   if (!date) {
-    console.log("⛔ chrono failed to parse:", timeRaw);
+    console.log("⛔ time parse failed:", timeRaw);
     return;
   }
   const postAt = Math.floor(date.getTime() / 1000);
-  if (postAt - Date.now() / 1000 < 60) {
-    console.log("⛔ scheduled time must be ≥60s in the future");
+  if (postAt - Date.now()/1000 < 60) {
+    console.log("⛔ scheduled time must be at least 60s in the future");
     return;
   }
 
-  // 1) Reply “I will do it.” in-thread
+  // 4) Reply “I will do it.” in-thread
   await slack.chat.postMessage({
     channel:   event.channel,
     thread_ts: event.ts,
     text:      "I will do it.",
   });
 
-  // 2) Open DM with the target user
-  let dmChannelId;
+  // 5) Try to open a DM, fallback to channel if it errors
+  let channelId = event.channel;
   try {
     const { channel } = await slack.conversations.open({ users: targetUser });
-    dmChannelId = channel.id;
+    channelId = channel.id;
   } catch (err) {
-    console.error("⚠️ unable to open DM:", err.data?.error);
-    return;
+    console.log("⚠️ cannot open DM, will post in channel instead");
   }
 
-  // 3) Schedule the DM reminder
+  // 6) Schedule the reminder (DM or channel)
   const resp = await slack.chat.scheduleMessage({
-    channel: dmChannelId,
+    channel: channelId,
     text:    `⏰ Reminder: ${taskText}`,
     post_at: postAt,
   });
   console.log("scheduled reminder:", resp.scheduled_message_id);
 }
 
-// Start the server
+// Start server
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Listening on ${PORT}`));
