@@ -4,60 +4,63 @@ import { WebClient } from "@slack/web-api";
 import * as chrono from "chrono-node";
 import morgan from "morgan";
 
-const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 const app   = express();
+const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 
 app.use(express.json());
 app.use(morgan("tiny"));
 
-// Health‐check (optional)
+// Health-check for browser
 app.get("/slack/webhook", (_, res) =>
-  res.send("Reminder bot up. POST events to /slack/webhook.")
+  res.send("Reminder bot alive. POST events to /slack/webhook.")
 );
 
+// Main webhook endpoint
 app.post("/slack/webhook", async (req, res) => {
   const { type, challenge, event } = req.body;
 
-  // Slack handshake
+  // 1. URL verification
   if (type === "url_verification") {
     return res.json({ challenge });
   }
 
-  // Only handle @bot mentions
+  // 2. Handle app_mention events only
   if (type === "event_callback" && event?.type === "app_mention") {
-    handleMention(event).catch(console.error);
+    handleMention(event).catch(err =>
+      console.error("handleMention error:", err)
+    );
   }
 
-  // Always 200 OK
+  // 3. Always respond 200 OK
   res.sendStatus(200);
 });
 
 async function handleMention(event) {
   console.log("🔔 handleMention called:", event.text);
 
-  // 1) Strip *only* the bot’s mention
+  // Strip only the bot mention
   const botId  = event.authorizations?.[0]?.user_id;
-  const botTag = `<@${botId}>`;
+  const botTag = new RegExp(`<@${botId}>`, "g");
   let text     = event.text.replace(botTag, "").trim();
 
-  // 2) Extract target user and the reminder text+time
-  //    Expect: “please remind @U123 to do X at TIME”
-  const remindRE = /remind\s+<@([A-Z0-9]+)>\s+(.*)\s+at\s+(.+)$/i;
-  const m = text.match(remindRE);
-  if (!m) {
+  // Regex to capture: optional “please ”, then “remind @user”, optional “to ”,
+  // then the task, then “ at ”, then time expression
+  const remindRE = /^(?:please\s+)?remind\s+<@([A-Z0-9]+)>\s+(?:to\s+)?(.+?)\s+at\s+(.+)$/i;
+  const match    = text.match(remindRE);
+  if (!match) {
     console.log("⛔ did not match remind pattern");
     return;
   }
-  const [, targetUser, taskText, timeRaw] = m;
+  const [, targetUser, taskText, timeRaw] = match;
 
-  // 3) Parse time with chrono
-  let timeStr = timeRaw.trim();
-  if (/^\d+\s*(minutes?|hours?)$/i.test(timeStr)) {
-    timeStr = "in " + timeStr;
+  // Parse natural-language time
+  let whenText = timeRaw.trim();
+  if (/^\d+\s*(minutes?|hours?)$/i.test(whenText)) {
+    whenText = "in " + whenText;
   }
-  const date = chrono.parseDate(timeStr, new Date(), { forwardDate: true });
+  const date = chrono.parseDate(whenText, new Date(), { forwardDate: true });
   if (!date) {
-    console.log("⛔ time parse failed:", timeRaw);
+    console.log("⛔ chrono failed to parse:", timeRaw);
     return;
   }
   const postAt = Math.floor(date.getTime() / 1000);
@@ -66,25 +69,32 @@ async function handleMention(event) {
     return;
   }
 
-  // 4) Reply to the original message in-thread
+  // 1) Reply “I will do it.” in-thread
   await slack.chat.postMessage({
-    channel: event.channel,
+    channel:   event.channel,
     thread_ts: event.ts,
-    text: "I will do it.",
+    text:      "I will do it.",
   });
 
-  // 5) Open (or fetch) a DM channel with the target user
-  const { channel: dm } = await slack.conversations.open({ users: targetUser });
+  // 2) Open DM with the target user
+  let dmChannelId;
+  try {
+    const { channel } = await slack.conversations.open({ users: targetUser });
+    dmChannelId = channel.id;
+  } catch (err) {
+    console.error("⚠️ unable to open DM:", err.data?.error);
+    return;
+  }
 
-  // 6) Schedule the actual reminder DM
+  // 3) Schedule the DM reminder
   const resp = await slack.chat.scheduleMessage({
-    channel: dm.id,
-    text: `⏰ Reminder: ${taskText}`,
+    channel: dmChannelId,
+    text:    `⏰ Reminder: ${taskText}`,
     post_at: postAt,
   });
   console.log("scheduled reminder:", resp.scheduled_message_id);
 }
 
-// Start server
+// Start the server
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Listening on ${PORT}`));
