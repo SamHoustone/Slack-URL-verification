@@ -1,19 +1,41 @@
-// index.js — Slack Reminder Bot with timezone-aware parsing
+// index.js — Slack Reminder Bot with timezone-aware absolute times
+// -------------------------------------------------------------------------
+// 1) Ensure package.json has:
+// {
+//   "type": "module",
+//   "dependencies": {
+//     "@slack/web-api": "^7.3.0",
+//     "chrono-node":   "^2.7.8",
+//     "moment-timezone": "^0.5.43",
+//     "express":       "^4.19.0",
+//     "morgan":        "^1.10.0"
+//   }
+// }
+// 2) Install new dependency:
+//    npm install moment-timezone
+// 3) ENV var:
+//    SLACK_BOT_TOKEN = xoxb-… (Secret)
+// 4) Slack scopes:
+//    chat:write, im:read, im:write, users:read, channels:read, channels:history
+//    (reinstall after adding scopes)
+// 5) Subscribe to app_mention event and invite bot to channel.
+
 import express from "express";
 import { WebClient } from "@slack/web-api";
 import * as chrono from "chrono-node";
 import moment from "moment-timezone";
 import morgan from "morgan";
 
-// User's timezone, based on user_info
+// Fixed timezone for parsing absolute times
 const USER_TIMEZONE = "America/Moncton";
 
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
-const app = express();
+const app   = express();
+
 app.use(express.json());
 app.use(morgan("tiny"));
 
-// Health check
+// Health-check
 app.get("/slack/webhook", (_, res) =>
   res.send("Reminder bot running. POST to /slack/webhook.")
 );
@@ -31,14 +53,15 @@ app.post("/slack/webhook", async (req, res) => {
 
 async function handleMention(event) {
   console.log("🔔 handleMention called:", event.text);
-  // Strip bot mention
-  const botId = event.authorizations?.[0]?.user_id;
-  const botTag = `<@${botId}>`;
-  let text = event.text.replace(botTag, "").trim();
 
-  // Regex to match both "me" and "@user"
+  // Strip only bot's mention
+  const botId  = event.authorizations?.[0]?.user_id;
+  const botTag = `<@${botId}>`;
+  let text     = event.text.replace(botTag, "").trim();
+
+  // Unified regex for both "me" and "@user"
   const remindRE = /remind\s+(?:<@([A-Z0-9]+)>|me)\s+(?:to\s+)?(.+?)\s+at\s+(.+)/i;
-  const m = text.match(remindRE);
+  const m        = text.match(remindRE);
   if (!m) {
     console.log("⛔ no remind pattern match");
     return;
@@ -47,19 +70,22 @@ async function handleMention(event) {
   const [, mentionedUser, taskText, timeRaw] = m;
   const targetUser = mentionedUser || event.user;
 
-  // Parse time: absolute times via moment-timezone, else relative via chrono
+  // Determine scheduled date
   let date = null;
   const raw = timeRaw.trim();
-  // Absolute times like "9:30 pm" or "9 pm"
+
+  // Absolute time e.g. "9:53 pm" or "9 pm"
   if (/^\d{1,2}(:\d{2})?\s*(am|pm)?$/i.test(raw)) {
-    // Determine format
+    // Choose format based on presence of minutes
     const fmt = raw.includes(":") ? "h:mm a" : "h a";
-    const mDate = moment.tz(raw, fmt, USER_TIMEZONE);
-    // If parsed date is before now in user tz, add 1 day
-    if (mDate.isBefore(moment.tz(USER_TIMEZONE))) mDate.add(1, 'day');
+    let mDate = moment.tz(raw, fmt, USER_TIMEZONE);
+    // If parsed time is before now in that tz, add a day
+    if (mDate.isBefore(moment.tz(USER_TIMEZONE))) {
+      mDate = mDate.add(1, "day");
+    }
     date = mDate.toDate();
   } else {
-    // Relative expressions
+    // Relative expressions via chrono
     let whenText = raw;
     if (/^\d+\s*(minutes?|hours?)$/i.test(whenText)) {
       whenText = "in " + whenText;
@@ -74,18 +100,18 @@ async function handleMention(event) {
 
   const postAt = Math.floor(date.getTime() / 1000);
   if (postAt - Date.now() / 1000 < 60) {
-    console.log("⛔ scheduled time must be ≥60s in the future");
+    console.log("⛔ scheduled time must be ≥ 60s in the future");
     return;
   }
 
-  // Reply in thread
+  // Reply in-thread
   await slack.chat.postMessage({
-    channel: event.channel,
+    channel:   event.channel,
     thread_ts: event.ts,
-    text: "I will do it.",
+    text:      "I will do it.",
   });
 
-  // Open DM
+  // Open DM or fallback
   let channelId = event.channel;
   try {
     const { channel } = await slack.conversations.open({ users: targetUser });
@@ -94,15 +120,14 @@ async function handleMention(event) {
     console.log("⚠️ cannot open DM, using channel instead");
   }
 
-  // Schedule message
+  // Schedule reminder message
   const resp = await slack.chat.scheduleMessage({
     channel: channelId,
-    text: `⏰ Reminder: ${taskText}`,
+    text:    `⏰ Reminder: ${taskText}`,
     post_at: postAt,
   });
   console.log("scheduled reminder:", resp.scheduled_message_id);
 }
 
-// Start
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Listening on ${PORT}`));
