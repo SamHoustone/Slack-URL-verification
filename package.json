@@ -7,8 +7,9 @@
   },
   "dependencies": {
     "@slack/web-api": "^7.3.0",
-    "chrono-node":  "^2.7.8",
-    "express":      "^4.19.0",
-    "morgan":       "^1.10.0"
+    "chrono-node": "^2.7.8",
+    "express": "^4.19.0",
+    "moment-timezone": "^0.5.48",
+    "morgan": "^1.10.0"
   }
 }
