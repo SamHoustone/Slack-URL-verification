@@ -22,7 +22,7 @@ Requirements in package.json:
 import express from 'express';
 import morgan from 'morgan';
 import { WebClient } from '@slack/web-api';
-import chrono from 'chrono-node';
+import * as chrono from 'chrono-node';  // updated import
 import moment from 'moment-timezone';
 import cron from 'node-cron';
 import { v4 as uuid } from 'uuid';
