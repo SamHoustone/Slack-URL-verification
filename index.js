@@ -30,34 +30,49 @@ app.post("/slack/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
-// Zapier endpoint: receives { userId?, channel?, thread_ts?, name, phone, callback_time }
+// Zapier endpoint: receives { channel?, thread_ts?, name, phone, callback_time }
 app.post("/slack/zapier", async (req, res) => {
-  const { userId, channel, thread_ts, name, phone, callback_time } = req.body;
+  const { channel, thread_ts, name, phone, callback_time } = req.body;
   try {
+    // Immediate acknowledgement in Slack
+    if (channel && thread_ts) {
+      await slack.chat.postMessage({
+        channel,
+        thread_ts,
+        text: `👍 Got your callback request for *${name}* at *${callback_time}*`
+      });
+    } else if (req.body.userId) {
+      const dmOpen = await slack.conversations.open({ users: req.body.userId });
+      await slack.chat.postMessage({
+        channel: dmOpen.channel.id,
+        text: `👍 Got your callback request for *${name}* at *${callback_time}*`
+      });
+    }
+
+    // Parse callback_time in Moncton timezone
     const tz = "America/Moncton";
     const m  = moment.tz(callback_time, tz);
     const postAt = m.unix();
 
+    // Schedule the reminder
     if (channel && thread_ts) {
-      // Schedule message in the original thread
       await slack.chat.scheduleMessage({
         channel,
         post_at: postAt,
         text: `⏰ *Callback Reminder*\n• *Name:* ${name}\n• *Phone:* ${phone}\n• *Requested:* ${m.format("YYYY-MM-DD HH:mm")}`,
-        thread_ts: thread_ts
+        thread_ts
       });
       console.log(`✅ Scheduled thread reminder in ${channel}@${thread_ts}`);
-    } else if (userId) {
-      // Fallback: open DM and schedule there
-      const dm = await slack.conversations.open({ users: userId });
+    } else if (req.body.userId) {
+      const dm = await slack.conversations.open({ users: req.body.userId });
       await slack.chat.scheduleMessage({
         channel: dm.channel.id,
         post_at: postAt,
         text: `⏰ *Callback Reminder*\n• *Name:* ${name}\n• *Phone:* ${phone}\n• *Requested:* ${m.format("YYYY-MM-DD HH:mm")}`
       });
-      console.log(`✅ Scheduled DM reminder for ${userId}`);
+      console.log(`✅ Scheduled DM reminder for ${req.body.userId}`);
     } else {
-      throw new Error('No target specified (userId or channel/thread_ts required)');
+      throw new Error('No target specified (channel/thread_ts or userId required)');
     }
 
     res.sendStatus(200);
