@@ -30,45 +30,62 @@ app.post("/slack/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
-// Zapier endpoint: receives { channel, thread_ts, name, phone, callback_time }
+// Zapier endpoint: receives { channel?, thread_ts?, userId?, name, phone, callback_time }
 app.post("/slack/zapier", async (req, res) => {
-  // DEBUG: log incoming payload
   console.log("⏳ Received /slack/zapier payload:", req.body);
+  const { channel, thread_ts, userId, name, phone, callback_time } = req.body;
 
-  const { channel, thread_ts, name, phone, callback_time } = req.body;
-
-  // Validate target
-  if (!channel || !thread_ts) {
-    console.error("❌ Missing target: channel or thread_ts", req.body);
-    return res.status(400).json({ error: "Missing channel and/or thread_ts in payload" });
+  // Acknowledge thread and/or DM immediately
+  try {
+    if (channel && thread_ts) {
+      await slack.chat.postMessage({
+        channel,
+        thread_ts,
+        text: `👍 Got your callback request for *${name}* at *${callback_time}*`
+      });
+    }
+    if (userId) {
+      const dmOpen = await slack.conversations.open({ users: userId });
+      await slack.chat.postMessage({
+        channel: dmOpen.channel.id,
+        text: `👍 Got your callback request for *${name}* at *${callback_time}*`
+      });
+    }
+  } catch (ackErr) {
+    console.error("❌ Ack error:", ackErr);
   }
 
+  // Parse callback_time robustly via chrono
+  const tz = "America/Moncton";
+  const parsedDate = chrono.parseDate(callback_time, new Date());
+  const m  = moment(parsedDate).tz(tz);
+  const postAt = m.unix();
+
+  // Schedule the actual reminder
   try {
-    // Immediate acknowledgement back into thread
-    await slack.chat.postMessage({
-      channel,
-      thread_ts,
-      text: `👍 Got your callback request for *${name}* at *${callback_time}*`
-    });
-
-    // Robustly parse callback_time using chrono
-    const tz = "America/Moncton";
-    const parsedDate = chrono.parseDate(callback_time, new Date());
-    const m = moment(parsedDate).tz(tz);
-    const postAt = m.unix();
-
-    // Schedule the reminder
-    await slack.chat.scheduleMessage({
-      channel,
-      post_at: postAt,
-      text: `⏰ *Callback Reminder*\n• *Name:* ${name}\n• *Phone:* ${phone}\n• *Requested:* ${m.format("YYYY-MM-DD HH:mm")}`,
-      thread_ts
-    });
-    console.log(`✅ Scheduled thread reminder in ${channel}@${thread_ts}`);
+    if (channel && thread_ts) {
+      await slack.chat.scheduleMessage({
+        channel,
+        post_at: postAt,
+        text: `⏰ *Callback Reminder*\n• *Name:* ${name}\n• *Phone:* ${phone}\n• *Requested:* ${m.format("YYYY-MM-DD HH:mm")}`,
+        thread_ts
+      });
+      console.log(`✅ Scheduled thread reminder for ${channel}@${thread_ts}`);
+    } else if (userId) {
+      const dm = await slack.conversations.open({ users: userId });
+      await slack.chat.scheduleMessage({
+        channel: dm.channel.id,
+        post_at: postAt,
+        text: `⏰ *Callback Reminder*\n• *Name:* ${name}\n• *Phone:* ${phone}\n• *Requested:* ${m.format("YYYY-MM-DD HH:mm")}`
+      });
+      console.log(`✅ Scheduled DM reminder for ${userId}`);
+    } else {
+      console.warn("⚠️ No channel/thread_ts or userId provided; skipping schedule.");
+    }
     res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ Error scheduling callback:", err);
-    res.status(500).json({ error: err.data || err.message });
+  } catch (schedErr) {
+    console.error("❌ Scheduling error:", schedErr);
+    res.status(500).json({ error: schedErr.data || schedErr.message });
   }
 });
 
@@ -84,7 +101,12 @@ async function sendThreadToZapier(event) {
   await fetch(ZAPIER_URL, {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify({ threadContent: texts, channel: event.channel, thread_ts: threadTs })
+    body:    JSON.stringify({
+      threadContent: texts,
+      channel: event.channel,
+      thread_ts: threadTs,
+      userId: event.user
+    })
   });
   console.log("✅ Thread sent to Zapier");
 }
@@ -94,13 +116,13 @@ async function handleMention(event) {
   const botTag = `<@${event.authorizations?.[0]?.user_id}>`;
   const text   = event.text.replace(botTag, "").trim();
 
-  // If not a "remind" command, forward thread
+  // Forward all non-remind mentions
   if (!/^remind\b/i.test(text)) {
     await sendThreadToZapier(event);
     return;
   }
 
-  // Parse "remind me to ... at ..." or "remind @user ... at ..."
+  // Existing remind flow
   const REMIND_RE = /remind\s+(?:<@([A-Z0-9]+)>|me)\s+(?:to\s+)?(.+?)\s+at\s+(.+)/i;
   const m = text.match(REMIND_RE);
   if (!m) return;
@@ -111,7 +133,6 @@ async function handleMention(event) {
   const now = moment().tz(tz);
   let scheduleMoment;
 
-  // Parse natural-language for reminder time
   const abs = timeRaw.match(/^\s*(\d{1,2}):(\d{2})\s*(am|pm)\s*$/i);
   if (abs) {
     let hour = parseInt(abs[1], 10) % 12;
@@ -126,13 +147,11 @@ async function handleMention(event) {
   const delaySec = scheduleMoment.unix() - now.unix();
   if (delaySec < 60) return;
 
-  // Acknowledge
+  // Acknowledge and forward
   await slack.chat.postMessage({ channel: event.channel, thread_ts: event.ts, text: "I will do it." });
-
-  // Forward thread for processing
   await sendThreadToZapier(event);
 
-  // Schedule a DM reminder locally
+  // Local DM schedule
   setTimeout(async () => {
     try {
       const dm = await slack.conversations.open({ users: targetUser });
