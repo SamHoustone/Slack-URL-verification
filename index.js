@@ -1,4 +1,4 @@
-// index.js — Slack “I will do it” Reminder Bot with Moncton‐aware scheduling
+// index.js — Slack “I will do it” Reminder Bot with Moncton‑aware scheduling
 // -------------------------------------------------------------------------
 // 1) package.json must include:
 // {
@@ -9,27 +9,18 @@
 //     "chrono-node":       "^2.7.8",
 //     "moment-timezone":   "^0.5.43",
 //     "express":           "^4.19.0",
-//     "morgan":            "^1.10.0"
+//     "morgan":            "^1.10.0",
+//     "node-fetch":        "^3.3.1"
 //   }
 // }
-//
-// 2) In your environment (e.g. Render → Environment Variables):
-//    SLACK_BOT_TOKEN = xoxb-…   (mark it Secret)
-//
-// 3) In your Slack App → OAuth & Permissions → Bot Token Scopes, add:
-//    chat:write, im:read, im:write, users:read, channels:read, channels:history
-//    then Reinstall to Workspace
-//
-// 4) In your Slack App → Event Subscriptions, subscribe to “app_mention” and
-//    set Request URL to https://<your-domain>/slack/webhook
-//
-// 5) Invite your bot to any channel you test in: `/invite @YourBot`
+// ...and ensure SLACK_BOT_TOKEN is set in your environment.
 
 import express from "express";
 import { WebClient } from "@slack/web-api";
 import * as chrono from "chrono-node";
 import moment from "moment-timezone";
 import morgan from "morgan";
+import fetch from "node-fetch"; // for sending to Zapier
 
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 const app   = express();
@@ -37,7 +28,7 @@ const app   = express();
 app.use(express.json());
 app.use(morgan("tiny"));
 
-// Health-check endpoint (optional)
+// Health-check endpoint
 app.get("/slack/webhook", (_req, res) =>
   res.send("Reminder bot is running. POST events to /slack/webhook.")
 );
@@ -46,17 +37,17 @@ app.get("/slack/webhook", (_req, res) =>
 app.post("/slack/webhook", async (req, res) => {
   const { type, challenge, event } = req.body;
 
-  // 1) URL verification handshake
+  // URL verification handshake
   if (type === "url_verification") {
     return res.json({ challenge });
   }
 
-  // 2) Only handle bot mentions
+  // Only handle bot mentions
   if (type === "event_callback" && event?.type === "app_mention") {
     handleMention(event).catch(console.error);
   }
 
-  // 3) Always acknowledge
+  // Always acknowledge
   res.sendStatus(200);
 });
 
@@ -76,7 +67,6 @@ async function handleMention(event) {
     return;
   }
 
-  // Determine target user and task/time
   const [, mentionedUser, taskText, timeRaw] = m;
   const targetUser = mentionedUser || event.user;
 
@@ -85,7 +75,6 @@ async function handleMention(event) {
   const now = moment().tz(tz);
 
   let scheduleMoment;
-  // Absolute time like "9:30 pm"
   const abs = timeRaw.match(/^\s*(\d{1,2}):(\d{2})\s*(am|pm)\s*$/i);
   if (abs) {
     let hour = parseInt(abs[1], 10) % 12;
@@ -95,7 +84,6 @@ async function handleMention(event) {
       scheduleMoment.add(1, "day");
     }
   } else {
-    // Relative time fallback, e.g. "in 2 minutes"
     let when = timeRaw.trim();
     if (/^\d+\s*(minutes?|hours?)$/i.test(when)) {
       when = "in " + when;
@@ -123,7 +111,26 @@ async function handleMention(event) {
     text:      "I will do it.",
   });
 
-  // 2) Schedule the DM
+  // 2) Fetch entire thread and send to Zapier for formatting
+  try {
+    const threadTs = event.thread_ts || event.ts;
+    const replies  = await slack.conversations.replies({ channel: event.channel, ts: threadTs });
+    const texts    = replies.messages
+      .filter(msg => msg.ts !== event.ts)
+      .map(msg => msg.text)
+      .join("\n\n");
+
+    await fetch("https://hooks.zapier.com/hooks/catch/15006197/uo22fas/", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ threadContent: texts }),
+    });
+    console.log('✅ Thread content sent to Zapier');
+  } catch (err) {
+    console.error('❌ Error sending thread to Zapier:', err);
+  }
+
+  // 3) Schedule the DM reminder
   setTimeout(async () => {
     try {
       const { channel } = await slack.conversations.open({ users: targetUser });

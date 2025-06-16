@@ -1,7 +1,9 @@
 {
-  "name": "slack-url-verification",
+  "name": "slack-reminder-bot",
   "version": "1.0.0",
+  "description": "Slack “I will do it” reminder bot with Moncton-aware scheduling and Zapier integration",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
@@ -9,7 +11,12 @@
     "@slack/web-api": "^7.3.0",
     "chrono-node": "^2.7.8",
     "express": "^4.19.0",
-    "moment-timezone": "^0.5.48",
-    "morgan": "^1.10.0"
-  }
+    "moment-timezone": "^0.5.43",
+    "morgan": "^1.10.0",
+    "node-fetch": "^3.3.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "license": "MIT"
 }
