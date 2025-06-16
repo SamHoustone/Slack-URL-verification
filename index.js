@@ -46,13 +46,13 @@ async function sendThreadToZapier(event) {
 
 // Handle @botmention
 async function handleMention(event) {
-  const botId  = event.authorizations?.[0]?.user_id;
-  const botTag = `<@${botId}>`;
-  let text     = event.text.replace(botTag, "").trim();
+  const botId    = event.authorizations?.[0]?.user_id;
+  const botTag   = `<@${botId}>`;
+  let text       = event.text.replace(botTag, "").trim();
 
-  // If in a thread and no remind command, just forward to Zapier
+  // If it's any mention (without remind), immediately forward thread
   const isRemind = /^remind\b/i.test(text);
-  if (event.thread_ts && !isRemind) {
+  if (!isRemind) {
     await sendThreadToZapier(event);
     return;
   }
@@ -88,7 +88,7 @@ async function handleMention(event) {
   // Acknowledge in thread
   await slack.chat.postMessage({ channel: event.channel, thread_ts: event.ts, text: "I will do it." });
 
-  // Forward thread to Zapier as well
+  // Forward thread to Zapier
   await sendThreadToZapier(event);
 
   // Schedule DM reminder
