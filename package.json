@@ -2,20 +2,19 @@
   "name": "slack-url-verification",
   "version": "1.0.0",
   "type": "module",
-  "scripts": {
-    "start": "node index.js"
-  },
+ "main": "index.js",
+  "scripts": { "start": "node index.js", "dev": "nodemon index.js" },
   "dependencies": {
-    "@slack/web-api": "^7.9.2",
-    "chrono-node": "^2.8.3",
-    "docx": "^7.8.2",
-    "express": "^4.21.2",
-    "moment-timezone": "^0.5.48",
-    "morgan": "^1.10.0",
-    "node-cron": "^3.0.3",
-    "uuid": "^9.0.1"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.10"
-  }
+  "@slack/web-api": "^7.3.0",
+  "chrono-node": "^2.7.8",
+  "moment-timezone": "^0.5.43",
+  "express": "^4.19.0",
+  "morgan": "^1.10.0",
+  "node-cron": "^3.0.0",
+  "uuid": "^9.0.0",
+  "docx": "^7.3.0"
+},
+"devDependencies": {
+  "nodemon": "..."
+}
 }
