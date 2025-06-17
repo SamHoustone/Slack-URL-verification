@@ -1,14 +1,16 @@
-// index.js — Slack “I will do it” Bot + Zapier JSON reply
+// index.js — Slack “I will do it” Bot + Zapier JSON -> Personal DM
 // -------------------------------------------------------------------------
 import express from "express";
 import { WebClient } from "@slack/web-api";
 import morgan from "morgan";
+import fetch from "node-fetch";
 
 // Environment variables:
 //   SLACK_BOT_TOKEN — your Slack bot token
-//   ZAPIER_URL      — Zapier hook URL (not used here)
+//   ZAPIER_URL      — Zapier hook URL
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
 const app   = express();
+const ZAPIER_URL = process.env.ZAPIER_URL;
 
 app.use(express.json());
 app.use(morgan("tiny"));
@@ -19,57 +21,63 @@ app.get("/slack/webhook", (_req, res) => res.send("Reminder bot is running."));
 // Slack Events endpoint
 app.post("/slack/webhook", async (req, res) => {
   const { type, challenge, event } = req.body;
-  if (type === "url_verification") return res.json({ challenge });
-  if (type === "event_callback" && event?.type === "app_mention") {
+  if (type === "url_verification") {
+    return res.json({ challenge });
+  }
+  if (type === "event_callback" && event.type === "app_mention") {
     handleMention(event).catch(console.error);
   }
   res.sendStatus(200);
 });
 
-// Zapier endpoint: receives { channel, thread_ts, ...data }
+// Zapier endpoint: receives { userId, ...data }
 app.post("/slack/zapier", async (req, res) => {
-  const payload = req.body;
-  const { channel, thread_ts } = payload;
+  console.log("⏳ Received /slack/zapier payload:", req.body);
+  const { userId, ...data } = req.body;
 
-  if (!channel || !thread_ts) {
-    return res.status(400).json({ error: "Missing channel or thread_ts" });
+  if (!userId) {
+    return res.status(400).json({ error: "Missing userId in payload" });
   }
 
-  // Construct reply text from payload (excluding channel/thread_ts)
-  const replyData = { ...payload };
-  delete replyData.channel;
-  delete replyData.thread_ts;
-
-  const text = 'Received data: ' + JSON.stringify(replyData, null, 2);
+  // Format data for DM
+  const text = "Received data: " + JSON.stringify(data, null, 2);
 
   try {
-    await slack.chat.postMessage({ channel, thread_ts, text });
+    // Open DM channel to the user
+    const dm = await slack.conversations.open({ users: userId });
+    await slack.chat.postMessage({ channel: dm.channel.id, text });
+    console.log(`✅ Sent DM to ${userId}`);
     res.sendStatus(200);
   } catch (err) {
-    console.error("❌ Error replying to thread:", err);
+    console.error("❌ Error sending DM:", err);
     res.status(500).json({ error: err.data || err.message });
   }
 });
 
-// Processes @botmention events
-async function handleMention(event) {
-  const botTag = `<@${event.authorizations?.[0]?.user_id}>`;
-  const text   = event.text.replace(botTag, "").trim();
-
-  // Forward all mentions to Zapier
-  const webhookUrl = process.env.ZAPIER_URL;
+// Helper: forwards entire Slack thread to Zapier for parsing
+async function sendThreadToZapier(event) {
   const threadTs = event.thread_ts || event.ts;
+  const resp     = await slack.conversations.replies({ channel: event.channel, ts: threadTs });
+  const content  = resp.messages
+    .filter(msg => msg.ts !== event.ts)
+    .map(msg => msg.text)
+    .join("\n\n");
 
-  // Fetch thread messages
-  const resp = await slack.conversations.replies({ channel: event.channel, ts: threadTs });
-  const threadText = resp.messages.map(m => m.text).join("\n\n");
-
-  // Send to Zapier
-  await fetch(webhookUrl, {
+  await fetch(ZAPIER_URL, {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify({ channel: event.channel, thread_ts: threadTs, content: threadText })
+    body:    JSON.stringify({ userId: event.user, content })
   });
+  console.log("✅ Thread sent to Zapier");
+}
+
+// Processes @botmention events
+async function handleMention(event) {
+  const botTag = `<@${event.authorizations[0].user_id}>`;
+  const text   = event.text.replace(botTag, "").trim();
+
+  // Always forward thread to Zapier for DM reply
+  await sendThreadToZapier(event);
 }
 
 // Start the HTTP server
