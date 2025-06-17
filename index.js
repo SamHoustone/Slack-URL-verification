@@ -73,11 +73,11 @@ async function sendThreadToZapier(event) {
 
 // Processes @botmention events
 async function handleMention(event) {
-  const botTag = `<@${event.authorizations[0].user_id}>`;
-  const text   = event.text.replace(botTag, "").trim();
-
-  // Always forward thread to Zapier for DM reply
-  await sendThreadToZapier(event);
+  try {
+    await sendThreadToZapier(event);
+  } catch (err) {
+    console.error("❌ Error in handleMention:", err);
+  }
 }
 
 // Start the HTTP server
