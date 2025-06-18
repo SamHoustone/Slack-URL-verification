@@ -16,9 +16,7 @@ app.use(express.json());
 app.use(morgan("tiny"));
 
 // Health-check endpoint
-app.get("/slack/webhook", (_req, res) =>
-  res.send("Reminder bot is running.")
-);
+app.get("/slack/webhook", (_req, res) => res.send("Reminder bot is running."));
 
 // Slack Events endpoint
 app.post("/slack/webhook", async (req, res) => {
@@ -29,25 +27,27 @@ app.post("/slack/webhook", async (req, res) => {
     return res.json({ challenge });
   }
 
-  // Handle an @mention event
+  // Handle app mentions
   if (type === "event_callback" && event.type === "app_mention") {
     handleMention(event).catch(console.error);
   }
 
   // Acknowledge receipt
   res.sendStatus(200);
-});  // ← Note the closing `});` here, not `};`
+});
 
 // Zapier endpoint: receives { userId, ...data }
 app.post("/slack/zapier", async (req, res) => {
   console.log(":hourglass_flowing_sand: Received /slack/zapier payload:", req.body);
   const { userId, ...data } = req.body;
+
   if (!userId) {
     return res.status(400).json({ error: "Missing userId in payload" });
   }
 
   // Format data for DM
   const text = "Received data: " + JSON.stringify(data, null, 2);
+
   try {
     // Open DM channel to the user
     const dm = await slack.conversations.open({ users: userId });
@@ -60,26 +60,25 @@ app.post("/slack/zapier", async (req, res) => {
   }
 });
 
-// Helper: forwards entire Slack thread to Zapier for parsing, dropping only the thread’s root
+// Helper: forwards entire Slack thread to Zapier for parsing
 async function sendThreadToZapier(event) {
   const threadTs = event.thread_ts || event.ts;
-  const resp     = await slack.conversations.replies({
-    channel: event.channel,
-    ts:      threadTs
-  });
 
+  // Fetch all messages in the thread
+  const resp = await slack.conversations.replies({ channel: event.channel, ts: threadTs });
+
+  // Join text of every message (root + replies)
   const content = resp.messages
-    .filter(m => m.ts !== threadTs)
-    .map(m =>
-      m.text.replace(/<@[^>]+>/g, "").trim()
-    )
+    .map(msg => msg.text)
     .join("\n\n");
 
+  // POST to Zapier
   await fetch(ZAPIER_URL, {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
     body:    JSON.stringify({ userId: event.user, content })
   });
+
   console.log(":white_check_mark: Thread sent to Zapier");
 }
 
