@@ -1,0 +1,25 @@
+service: slack-reminder-bot
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-east-1       # or your preferred region
+  environment:
+    SLACK_BOT_TOKEN: ${env:SLACK_BOT_TOKEN}
+    ZAPIER_URL:      ${env:ZAPIER_URL}
+
+functions:
+  slack:
+    handler: index.handler
+    events:
+      - httpApi:       # Uses AWS HTTP API (faster & cheaper than REST API)
+          path: /slack/webhook
+          method: POST
+      - httpApi:
+          path: /slack/zapier
+          method: POST
+
+plugins:
+  - serverless-offline   # for local testing
